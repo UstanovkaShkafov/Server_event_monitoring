@@ -1,0 +1,12 @@
+venv\Scripts\activate - активировать виртуальное окружение
+
+uvicorn app.main:app --reload
+
+
+  "organization": "gazik",
+  "field": "Северное месторождение",
+  "event_area": "бурение",
+  "event_type": "Инцидент",
+  "description": "Разрыв обсадной колонны",
+  "consequences": "Остановка бурения",
+  "comments": "Скважина №35"
