@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from app.database import get_db, engine, Base
@@ -14,11 +14,58 @@ from .auth import SECRET_KEY, ALGORITHM, create_access_token, ACCESS_TOKEN_EXPIR
 import uvicorn
 from app.auth import get_current_user 
 from typing import Optional
+import pandas as pd
 
 
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+
+
+def process_excel(file: UploadFile, db: Session, user_id: int):
+    try:
+        # 1️⃣ Читаем Excel-файл с указанием строки заголовков (третья строка → `header=2`)
+        df = pd.read_excel(file.file, engine="openpyxl", header=0)  
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Ошибка чтения файла: {str(e)}")
+
+    # 2️⃣ Проверяем наличие необходимых столбцов
+    expected_columns = {"Дата", "ДО", "Месторождение/лицензионные участки", 
+                        "Область события", "Тип", "Описание происшествия", 
+                        "Последствия", "Комментарии"}
+
+    if not expected_columns.issubset(df.columns):
+        raise HTTPException(status_code=400, detail="Некорректный формат файла. Проверьте названия столбцов.")
+
+    # 3️⃣ Построчное считывание данных
+    incidents_to_add = []
+    for _, row in df.iterrows():
+        # 4️⃣ Обрабатываем дату (Excel может хранить дату в числовом формате)
+        try:
+            event_date = pd.to_datetime(row["Дата"], errors="coerce")
+            if pd.isnull(event_date):  # Если дата не распозналась, ставим текущую
+                event_date = datetime.utcnow()
+        except Exception:
+            event_date = datetime.utcnow()
+
+        # 5️⃣ Создаём объект происшествия
+        incident = Incident(
+            created_at=event_date,
+            field=row["Месторождение/лицензионные участки"],
+            event_area=row["Область события"],
+            event_type=row["Тип"],
+            description=row.get("Описание происшествия", ""),  # .get() чтобы не было ошибки, если пустое поле
+            consequences=row.get("Последствия", ""),
+            comments=row.get("Комментарии", ""),
+            user_id=user_id  # Привязываем к текущему пользователю
+        )
+        incidents_to_add.append(incident)
+
+    # 6️⃣ Добавляем все записи одним запросом
+    db.bulk_save_objects(incidents_to_add)
+    db.commit()
+
+    return {"message": f"Успешно добавлено {len(incidents_to_add)} происшествий"}
 
 # Простой эндпоинт для проверки работы API
 @app.get("/")
@@ -84,8 +131,14 @@ def show_incident(db: Session = Depends(get_db)):
         {
             "id": incident.id,
             "description": incident.description,
-            "location": incident.location,
-            "created_at": incident.created_at
+            "user": f"{incident.user.name} {incident.user.surname}",
+            "organization": incident.organization,
+            "field": incident.field,
+            "event_area": incident.event_area,
+            "event_type": incident.event_type,
+            "description": incident.description,
+            "consequences": incident.consequences,
+            "comments": incident.comments
         }
         for incident in incidents
     ]
@@ -173,6 +226,14 @@ def update_profile(
     db.refresh(current_user)
     return {"message": "Данные профиля обновлены"}
 
+# 📌 Эндпоинт для загрузки Excel
+@app.post("/upload_excel")
+def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Требуется авторизация")
+
+    return process_excel(file, db, current_user.id)
+
 
 # 1. у пользователя должен быть "личный кабинет". После логина уведомление о том, что ему нужно заполнить данные об аккаунте. (ФИО, оргинизация (ДО))
 # 2. Настройка для смены региона, чтобы при автоматическом времен (ЭТО НЕ НУЖНО, будет время по мск). Иначе будет неразбириха
@@ -189,5 +250,5 @@ def update_profile(
 
 
 # 7. Как лучше сделать лк
+# 8. Убрать organization у юзера
 
-#8. Бд исправить столбец organization
