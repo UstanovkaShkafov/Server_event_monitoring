@@ -25,15 +25,15 @@ app = FastAPI()
 def process_excel(file: UploadFile, db: Session, user_id: int):
     try:
         # 1️⃣ Читаем Excel-файл с указанием строки заголовков (третья строка → `header=2`)
-        df = pd.read_excel(file.file, engine="openpyxl", header=0)  
+        df = pd.read_excel(file.file, engine="openpyxl",header=2)  
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка чтения файла: {str(e)}")
 
     # 2️⃣ Проверяем наличие необходимых столбцов
-    expected_columns = {"Дата", "ДО", "Месторождение/лицензионные участки", 
+    expected_columns = {"Дата", "ДО", "Месторождение/\nлицензионные участки", 
                         "Область события", "Тип", "Описание происшествия", 
                         "Последствия", "Комментарии"}
-
+    print(df.columns)  #проверка столбцов
     if not expected_columns.issubset(df.columns):
         raise HTTPException(status_code=400, detail="Некорректный формат файла. Проверьте названия столбцов.")
 
@@ -51,7 +51,8 @@ def process_excel(file: UploadFile, db: Session, user_id: int):
         # 5️⃣ Создаём объект происшествия
         incident = Incident(
             created_at=event_date,
-            field=row["Месторождение/лицензионные участки"],
+            organization = row["ДО"],
+            field=row["Месторождение/\nлицензионные участки"],
             event_area=row["Область события"],
             event_type=row["Тип"],
             description=row.get("Описание происшествия", ""),  # .get() чтобы не было ошибки, если пустое поле
