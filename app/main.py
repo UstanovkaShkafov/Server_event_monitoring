@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from app.database import get_db, engine, Base
@@ -15,6 +15,7 @@ import uvicorn
 from app.auth import get_current_user 
 from typing import Optional
 import pandas as pd
+from io import BytesIO
 
 
 Base.metadata.create_all(bind=engine)
@@ -33,7 +34,7 @@ def process_excel(file: UploadFile, db: Session, user_id: int):
     expected_columns = {"Дата", "ДО", "Месторождение/\nлицензионные участки", 
                         "Область события", "Тип", "Описание происшествия", 
                         "Последствия", "Комментарии"}
-    print(df.columns)  #проверка столбцов
+    #print(df.columns)  #проверка столбцов
     if not expected_columns.issubset(df.columns):
         raise HTTPException(status_code=400, detail="Некорректный формат файла. Проверьте названия столбцов.")
 
@@ -145,6 +146,60 @@ def show_incident(db: Session = Depends(get_db)):
     ]
 
 
+@app.delete("/delete_incident/{incident_id}")
+def delete_incident(
+    incident_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    # Находим происшествие в базе данных
+    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+    
+    if not incident:
+        raise HTTPException(status_code=404, detail="Происшествие не найдено")
+    
+    # Проверяем, является ли текущий пользователь автором происшествия или админом
+    if current_user.role != "admin" and incident.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Вы не можете удалить это происшествие")
+
+    # Удаляем происшествие
+    db.delete(incident)
+    db.commit()
+
+    return {"message": "Происшествие успешно удалено"}
+
+
+
+@app.put("/incidents/{incident_id}")
+def update_incident(
+    incident_id: int,
+    incident_update: dict,  # Принимаем JSON как словарь
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Получаем происшествие по ID
+    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+
+    if not incident:
+        raise HTTPException(status_code=404, detail="Происшествие не найдено")
+
+    # Проверяем права: только автор или админ может редактировать
+    if incident.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Недостаточно прав для редактирования")
+
+    # Обновляем только переданные поля
+    for key, value in incident_update.items():
+        if hasattr(incident, key):  # Проверяем, есть ли такое поле в модели
+            setattr(incident, key, value)
+
+    db.commit()
+    db.refresh(incident)
+
+    return {"message": "Происшествие обновлено", "incident": incident}
+
+
+
+
 class UserCreate(BaseModel):
     username: str
     password: str
@@ -236,6 +291,51 @@ def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_db), cu
     return process_excel(file, db, current_user.id)
 
 
+
+@app.get("/export_incidents")
+def export_incidents(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Требуется авторизация")
+
+    # Получаем все происшествия из БД
+    incidents = db.query(Incident).all()
+
+    # Преобразуем в DataFrame
+    data = []
+    for incident in incidents:
+        data.append({
+            "Дата": incident.created_at.strftime("%Y-%m-%d %H:%M"),
+            "ДО": incident.organization,
+            "Месторождение/лицензионные участки": incident.field,
+            "Область события": incident.event_area,
+            "Тип": incident.event_type,
+            "Описание": incident.description,
+            "Последствия": incident.consequences,
+            "Комментарии": incident.comments,
+            "Создал": f"{incident.user.surname} {incident.user.name}" if incident.user else "Неизвестно"
+        })
+
+    df = pd.DataFrame(data)
+
+    # Сохраняем в буфер
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Происшествия")
+
+    output.seek(0)
+
+    # Возвращаем Excel-файл
+    headers = {
+        "Content-Disposition": "attachment; filename=incidents.xlsx",
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    }
+    return Response(
+    content=output.getvalue(),
+    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    headers={"Content-Disposition": "attachment; filename=export.xlsx"}
+)
+
+
 # 1. у пользователя должен быть "личный кабинет". После логина уведомление о том, что ему нужно заполнить данные об аккаунте. (ФИО, оргинизация (ДО))
 # 2. Настройка для смены региона, чтобы при автоматическом времен (ЭТО НЕ НУЖНО, будет время по мск). Иначе будет неразбириха
 # 3. При создании события, нужен внешний ключ, который будет указывать на создателя события
@@ -244,7 +344,7 @@ def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_db), cu
 # пользователь не может создавать события, пока не заполнит свои личные данные в личном кабинете; пользователь создаёт(регестрирует) событие,
 # жмёт кнопку добавить событие, открывается удобная форма для заполнения. Заполняет Месторождение/лицензионные участки,
 # область события (выбор из предложенного: люди, бурение, ТКРС, пожарная безопасность, энергетика, Нефтепромысловое оборудование, Экология,
-# транспорт, трубопроводы, скважины, др.), Тип(выбор из предложенного: Отказ, Запуск, Происшесвтие, Инцидент, Остановка), 
+# транспорт, трубопроводы, скважины, др.),  , 
 # Описание (не обязателньое поле), Комментарий(не обязательное поле), Последсвтия (не обязательное поле)
 # 6. Придумать "балл важности" для каждого события, который будет складываться из разных параметров происшествия (Отказ + 1 балл, люди + 8 баллов
 # как-то их суммировать и получить оценку от 1-10 и в зависимости от неё оповещать разных лиц)
