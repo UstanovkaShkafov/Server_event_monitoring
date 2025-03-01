@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Response
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Response, Query
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from app.database import get_db, engine, Base
@@ -127,20 +127,42 @@ def add_incident(
     }
 
 @app.get("/show_all_incident")
-def show_incident(db: Session = Depends(get_db)):
-    incidents = db.query(Incident).all()
+def show_incident(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    event_type: Optional[str] = Query(None, description="Фильтр по типу события"),
+    organization: Optional[str] = Query(None, description="Фильтр по организации"),
+    only_my: Optional[bool] = Query(False, description="Вывести только мои происшествия")
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Требуется авторизация")
+
+    # Базовый запрос
+    query = db.query(Incident)
+
+    # Применяем фильтры
+    if event_type:
+        query = query.filter(Incident.event_type == event_type)
+    if organization:
+        query = query.filter(Incident.organization == organization)
+    if only_my:
+        query = query.filter(Incident.user_id == current_user.id)
+
+    # Получаем отфильтрованные происшествия
+    incidents = query.all()
+
     return [
         {
             "id": incident.id,
-            "description": incident.description,
-            "user": f"{incident.user.name} {incident.user.surname}",
-            "organization": incident.organization,
-            "field": incident.field,
-            "event_area": incident.event_area,
-            "event_type": incident.event_type,
-            "description": incident.description,
-            "consequences": incident.consequences,
-            "comments": incident.comments
+            "Дата": incident.created_at.strftime("%Y-%m-%d %H:%M"),
+            "ДО": incident.organization,
+            "Месторождение/лицензионные участки": incident.field,
+            "Область события": incident.event_area,
+            "Тип": incident.event_type,
+            "Описание": incident.description,
+            "Последствия": incident.consequences,
+            "Комментарии": incident.comments,
+            "Создал": f"{incident.user.surname} {incident.user.name}" if incident.user else "Неизвестно"
         }
         for incident in incidents
     ]
@@ -282,7 +304,7 @@ def update_profile(
     db.refresh(current_user)
     return {"message": "Данные профиля обновлены"}
 
-# 📌 Эндпоинт для загрузки Excel
+# Эндпоинт для загрузки Excel
 @app.post("/upload_excel")
 def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     if not current_user:
@@ -293,17 +315,33 @@ def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_db), cu
 
 
 @app.get("/export_incidents")
-def export_incidents(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+def export_incidents(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    event_type: Optional[str] = Query(None, description="Фильтр по типу события"),
+    organization: Optional[str] = Query(None, description="Фильтр по организации"),
+    only_my: Optional[bool] = Query(False, description="Выводить только мои происшествия")
+):
     if not current_user:
         raise HTTPException(status_code=401, detail="Требуется авторизация")
 
-    # Получаем все происшествия из БД
-    incidents = db.query(Incident).all()
+    # Базовый запрос
+    query = db.query(Incident)
+
+    # Применяем фильтры
+    if event_type:
+        query = query.filter(Incident.event_type == event_type)
+    if organization:
+        query = query.filter(Incident.organization == organization)
+    if only_my:
+        query = query.filter(Incident.user_id == current_user.id)
+
+    # Получаем отфильтрованные происшествия
+    incidents = query.all()
 
     # Преобразуем в DataFrame
-    data = []
-    for incident in incidents:
-        data.append({
+    data = [
+        {
             "Дата": incident.created_at.strftime("%Y-%m-%d %H:%M"),
             "ДО": incident.organization,
             "Месторождение/лицензионные участки": incident.field,
@@ -313,7 +351,9 @@ def export_incidents(db: Session = Depends(get_db), current_user=Depends(get_cur
             "Последствия": incident.consequences,
             "Комментарии": incident.comments,
             "Создал": f"{incident.user.surname} {incident.user.name}" if incident.user else "Неизвестно"
-        })
+        }
+        for incident in incidents
+    ]
 
     df = pd.DataFrame(data)
 
@@ -325,15 +365,11 @@ def export_incidents(db: Session = Depends(get_db), current_user=Depends(get_cur
     output.seek(0)
 
     # Возвращаем Excel-файл
-    headers = {
-        "Content-Disposition": "attachment; filename=incidents.xlsx",
-        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    }
     return Response(
-    content=output.getvalue(),
-    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    headers={"Content-Disposition": "attachment; filename=export.xlsx"}
-)
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=export.xlsx"}
+    )
 
 
 # 1. у пользователя должен быть "личный кабинет". После логина уведомление о том, что ему нужно заполнить данные об аккаунте. (ФИО, оргинизация (ДО))
