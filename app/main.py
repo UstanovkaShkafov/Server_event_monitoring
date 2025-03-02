@@ -130,7 +130,7 @@ def add_incident(
 def show_incident(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
-    event_type: Optional[str] = Query(None, description="Фильтр по типу события"),
+    event_type: Optional[str] = Query(None, description="Фильтр по типу события"), #GET /show_all_incident?event_type=Инцидент
     organization: Optional[str] = Query(None, description="Фильтр по организации"),
     only_my: Optional[bool] = Query(False, description="Вывести только мои происшествия")
 ):
@@ -191,7 +191,7 @@ def delete_incident(
     return {"message": "Происшествие успешно удалено"}
 
 
-
+#Конкретное происшествие
 @app.put("/incidents/{incident_id}")
 def update_incident(
     incident_id: int,
@@ -247,6 +247,52 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
     db.refresh(new_user)  # Обновляем объект
 
     return {"message": f"Пользователь {user.username} успешно зарегистрирован!"}
+
+@app.get("/users")
+def get_users(user_id: int = None, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    # Проверка прав администратора
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Доступ запрещен. Только для администраторов.")
+
+    if user_id:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="Пользователь не найден")
+        return {
+            "id": user.id,
+            "Логин": user.username,
+            "ФИО": f"{user.surname or ''} {user.name or ''}".strip(),
+            "Роль": user.role
+        }
+    
+    users = db.query(User).all()
+    return [{"id": u.id, "Логин": u.username, "ФИО": f"{u.surname or ''} {u.name or ''}".strip(), "Роль": u.role} for u in users]
+
+
+@app.delete("/delete_user/{user_id}")
+def delete_user(user_id: int, current_user = Depends(get_current_user) ,db: Session = Depends(get_db)):
+    #найти юзера в бд
+    db_user = db.query(User).filter(User.id == user_id).first()
+
+    #Проверка на существование
+    if not db_user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    #Проверка на права админа
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Вы не можете удалить этого пользвателя. Недостаточно прав.")
+    
+    username = db_user.username
+    surname = db_user.surname
+    name = db_user.name
+    db.delete(db_user)
+    db.commit()
+
+    full_name = f"( {surname} {name})" if surname and name else ""
+    return f"Пользователь {username}{full_name} был удалён."
+
+
+
 
 
 
